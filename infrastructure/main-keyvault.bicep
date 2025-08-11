@@ -8,13 +8,13 @@ param location string = resourceGroup().location
 param resourceToken string = uniqueString(resourceGroup().id)
 
 // Variables
-var storageAccountName = 'alertdedup${resourceToken}'
-var logicAppName = 'alertdedup-logicapp-${environmentName}'
-var appServicePlanName = 'asp-mockservicenow-${environmentName}'
-var appServiceName = 'mockservicenow-${resourceToken}'
-var actionGroupName = 'ag-cdn-alerts-${environmentName}'
-var keyVaultName = 'kv-${take(resourceToken, 18)}'
-var managedIdentityName = 'mi-alertdedup-${environmentName}'
+var storageAccountName = 'dedupv2${resourceToken}'
+var logicAppName = 'alertdedup-v2-logicapp-${environmentName}'
+var appServicePlanName = 'asp-mockservicenow-v2-${environmentName}'
+var appServiceName = 'mockservicenow-v2-${resourceToken}'
+var actionGroupName = 'ag-cdn-alerts-v2-${environmentName}'
+var keyVaultName = 'kv-v2-${take(resourceToken, 15)}'
+var managedIdentityName = 'mi-alertdedup-v2-${environmentName}'
 
 // User-assigned managed identity for Logic App
 resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
@@ -38,8 +38,10 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2022-09-01' = {
   kind: 'StorageV2'
   properties: {
     allowBlobPublicAccess: false
+    allowSharedKeyAccess: true
     minimumTlsVersion: 'TLS1_2'
     supportsHttpsTrafficOnly: true
+    publicNetworkAccess: 'Enabled'
   }
 }
 
@@ -81,6 +83,21 @@ resource storageKeySecret 'Microsoft.KeyVault/vaults/secrets@2022-07-01' = {
   name: 'storage-account-key'
   properties: {
     value: storageAccount.listKeys().keys[0].value
+  }
+}
+
+// Generate SAS token for table access using listAccountSas
+resource tableSasSecret 'Microsoft.KeyVault/vaults/secrets@2022-07-01' = {
+  parent: keyVault
+  name: 'table-sas-token'
+  properties: {
+    value: storageAccount.listAccountSas('2022-09-01', {
+      signedServices: 't'
+      signedResourceTypes: 'sco'
+      signedPermission: 'rwdlacup'
+      signedExpiry: '2030-12-31T23:59:59Z'
+      signedProtocol: 'https'
+    }).accountSasToken
   }
 }
 
@@ -145,6 +162,25 @@ resource appService 'Microsoft.Web/sites@2022-09-01' = {
   }
 }
 
+// Azure Tables API Connection for Logic App
+resource azureTablesConnection 'Microsoft.Web/connections@2016-06-01' = {
+  name: 'azuretables-connection'
+  location: location
+  tags: {
+    'azd-env-name': environmentName
+  }
+  properties: {
+    displayName: 'Azure Tables Connection'
+    api: {
+      id: subscriptionResourceId('Microsoft.Web/locations/managedApis', location, 'azuretables')
+    }
+    parameterValues: {
+      storageaccount: storageAccount.name
+      sharedkey: storageAccount.listKeys().keys[0].value
+    }
+  }
+}
+
 // Logic App with complete secure workflow for ServiceNow integration
 resource logicApp 'Microsoft.Logic/workflows@2019-05-01' = {
   name: logicAppName
@@ -168,6 +204,9 @@ resource logicApp 'Microsoft.Logic/workflows@2019-05-01' = {
           type: 'String'
         }
         keyVaultUri: {
+          type: 'String'
+        }
+        keyVaultAudience: {
           type: 'String'
         }
         mockServiceNowUrl: {
@@ -240,7 +279,7 @@ resource logicApp 'Microsoft.Logic/workflows@2019-05-01' = {
             }
           }
         }
-        Get_Storage_Key_From_KeyVault: {
+        Get_SAS_Token_From_KeyVault: {
           runAfter: {
             Immediate_Response: [
               'Succeeded'
@@ -248,17 +287,18 @@ resource logicApp 'Microsoft.Logic/workflows@2019-05-01' = {
           }
           type: 'Http'
           inputs: {
-            uri: '@{parameters(\'keyVaultUri\')}secrets/storage-account-key?api-version=7.3'
+            uri: '@{parameters(\'keyVaultUri\')}secrets/table-sas-token?api-version=7.3'
             method: 'GET'
             authentication: {
               type: 'ManagedServiceIdentity'
+              audience: '@{parameters(\'keyVaultAudience\')}'
               identity: '@{parameters(\'managedIdentityResourceId\')}'
             }
           }
         }
         Initialize_Deduplication_Key: {
           runAfter: {
-            Get_Storage_Key_From_KeyVault: [
+            Get_SAS_Token_From_KeyVault: [
               'Succeeded'
             ]
           }
@@ -281,13 +321,11 @@ resource logicApp 'Microsoft.Logic/workflows@2019-05-01' = {
           }
           type: 'Http'
           inputs: {
-            uri: 'https://@{parameters(\'storageAccountName\')}.table.@{parameters(\'storageEndpointSuffix\')}/AlertDeduplication(PartitionKey=\'@{variables(\'DeduplicationKey\')}\',RowKey=\'@{variables(\'DeduplicationKey\')}\')'
+            uri: 'https://@{parameters(\'storageAccountName\')}.table.@{parameters(\'storageEndpointSuffix\')}/AlertDeduplication(PartitionKey=\'@{variables(\'DeduplicationKey\')}\',RowKey=\'@{variables(\'DeduplicationKey\')}\')?@{outputs(\'Get_SAS_Token_From_KeyVault\')?[\'body\']?[\'value\']}'
             method: 'GET'
             headers: {
               Accept: 'application/json;odata=nometadata'
-              'x-ms-date': '@{formatDateTime(utcNow(), \'ddd, dd MMM yyyy HH:mm:ss\')} GMT'
-              'x-ms-version': '2019-07-07'
-              Authorization: 'SharedKey @{parameters(\'storageAccountName\')}:@{base64(hmacSha256(concat(\'GET\', char(10), char(10), char(10), char(10), \'application/json;odata=nometadata\', char(10), char(10), char(10), char(10), char(10), char(10), formatDateTime(utcNow(), \'ddd, dd MMM yyyy HH:mm:ss\'), \' GMT\', char(10), \'/\', parameters(\'storageAccountName\'), \'/AlertDeduplication(PartitionKey=\'\'\', encodeUriComponent(variables(\'DeduplicationKey\')), \'\'\',RowKey=\'\'\', encodeUriComponent(variables(\'DeduplicationKey\')), \'\'\')\'), base64(outputs(\'Get_Storage_Key_From_KeyVault\')?[\'body\']?[\'value\'])))}'
+              'x-ms-version': '2020-08-04'
             }
           }
         }
@@ -304,123 +342,72 @@ resource logicApp 'Microsoft.Logic/workflows@2019-05-01' = {
               {
                 equals: [
                   '@outputs(\'Check_Deduplication_Table\')[\'statusCode\']'
-                  200
+                  404
                 ]
               }
             ]
           }
           actions: {
-            Log_Duplicate_Suppressed: {
-              type: 'Compose'
+            Store_Deduplication_Record: {
+              type: 'Http'
               inputs: {
-                message: 'Duplicate alert suppressed'
-                deduplicationKey: '@{variables(\'DeduplicationKey\')}'
-                timestamp: '@{utcNow()}'
+                uri: 'https://@{parameters(\'storageAccountName\')}.table.@{parameters(\'storageEndpointSuffix\')}/AlertDeduplication?@{outputs(\'Get_SAS_Token_From_KeyVault\')?[\'body\']?[\'value\']}'
+                method: 'POST'
+                headers: {
+                  Accept: 'application/json;odata=nometadata'
+                  'Content-Type': 'application/json'
+                  'x-ms-version': '2020-08-04'
+                }
+                body: {
+                  PartitionKey: '@{variables(\'DeduplicationKey\')}'
+                  RowKey: '@{variables(\'DeduplicationKey\')}'
+                  AlertRule: '@{triggerBody()?[\'data\']?[\'essentials\']?[\'alertRule\']}'
+                  AlertId: '@{triggerBody()?[\'data\']?[\'essentials\']?[\'alertId\']}'
+                  ProcessedDateTime: '@{utcNow()}'
+                  Severity: '@{triggerBody()?[\'data\']?[\'essentials\']?[\'severity\']}'
+                }
+              }
+            }
+            Create_ServiceNow_Ticket: {
+              runAfter: {
+                Store_Deduplication_Record: [
+                  'Succeeded'
+                ]
+              }
+              type: 'Http'
+              inputs: {
+                uri: '@{parameters(\'mockServiceNowUrl\')}/api/now/table/incident'
+                method: 'POST'
+                headers: {
+                  Accept: 'application/json'
+                  'Content-Type': 'application/json'
+                  Authorization: 'Basic QVpVUkVfSU5TSUdIVDpII1hkW3UxbikmaztDc3A/T2ZZIzA5OV8+QE07UjlbcSFSamJXUCs5'
+                }
+                body: {
+                  caller_id: 'e8600d0e1bb4ea10523aca67624bcb4b'
+                  assignment_group: '12503dd987754e502421ff78cebb35bd'
+                  short_description: 'DEDUPLICATED CDN Alert: @{triggerBody()?[\'data\']?[\'essentials\']?[\'alertRule\']}'
+                  description: '@{triggerBody()?[\'data\']?[\'essentials\']?[\'description\']} - Deduplication Key: @{variables(\'DeduplicationKey\')} - Processed at: @{utcNow()}'
+                  impact: '2'
+                  urgency: '2'
+                }
+                retryPolicy: {
+                  type: 'exponential'
+                  count: 3
+                  interval: 'PT10S'
+                  maximumInterval: 'PT1M'
+                }
               }
             }
           }
           else: {
             actions: {
-              Store_Deduplication_Record: {
-                type: 'Http'
+              Log_Duplicate_Suppressed: {
+                type: 'Compose'
                 inputs: {
-                  uri: 'https://@{parameters(\'storageAccountName\')}.table.@{parameters(\'storageEndpointSuffix\')}/AlertDeduplication'
-                  method: 'POST'
-                  headers: {
-                    Accept: 'application/json;odata=nometadata'
-                    'Content-Type': 'application/json'
-                    'x-ms-date': '@{formatDateTime(utcNow(), \'ddd, dd MMM yyyy HH:mm:ss\')} GMT'
-                    'x-ms-version': '2019-07-07'
-                    Authorization: 'SharedKey @{parameters(\'storageAccountName\')}:@{base64(hmacSha256(concat(\'POST\', char(10), char(10), char(10), \'application/json\', char(10), \'application/json;odata=nometadata\', char(10), char(10), char(10), char(10), char(10), char(10), formatDateTime(utcNow(), \'ddd, dd MMM yyyy HH:mm:ss\'), \' GMT\', char(10), \'/\', parameters(\'storageAccountName\'), \'/AlertDeduplication\'), base64(outputs(\'Get_Storage_Key_From_KeyVault\')?[\'body\']?[\'value\'])))}'
-                  }
-                  body: {
-                    PartitionKey: '@{variables(\'DeduplicationKey\')}'
-                    RowKey: '@{variables(\'DeduplicationKey\')}'
-                    AlertRule: '@{triggerBody()?[\'data\']?[\'essentials\']?[\'alertRule\']}'
-                    AlertId: '@{triggerBody()?[\'data\']?[\'essentials\']?[\'alertId\']}'
-                    ProcessedDateTime: '@{utcNow()}'
-                    Severity: '@{triggerBody()?[\'data\']?[\'essentials\']?[\'severity\']}'
-                  }
-                }
-              }
-              Create_ServiceNow_Ticket: {
-                runAfter: {
-                  Store_Deduplication_Record: [
-                    'Succeeded'
-                  ]
-                }
-                type: 'Http'
-                inputs: {
-                  uri: '@{parameters(\'mockServiceNowUrl\')}/api/now/table/incident'
-                  method: 'POST'
-                  headers: {
-                    Accept: 'application/json'
-                    'Content-Type': 'application/json'
-                    Authorization: 'Basic QVpVUkVfSU5TSUdIVDpII1hkW3UxbikmaztDc3A/T2ZZIzA5OV8+QE07UjlbcSFSamJXUCs5'
-                  }
-                  body: {
-                    caller_id: 'e8600d0e1bb4ea10523aca67624bcb4b'
-                    assignment_group: '12503dd987754e502421ff78cebb35bd'
-                    short_description: 'DEDUPLICATED CDN Alert: @{triggerBody()?[\'data\']?[\'essentials\']?[\'alertRule\']}'
-                    description: '@{triggerBody()?[\'data\']?[\'essentials\']?[\'description\']} - Deduplication Key: @{variables(\'DeduplicationKey\')} - Processed at: @{utcNow()}'
-                    impact: '2'
-                    urgency: '2'
-                  }
-                  retryPolicy: {
-                    type: 'exponential'
-                    count: 3
-                    interval: 'PT10S'
-                    maximumInterval: 'PT1M'
-                  }
-                }
-              }
-              Handle_ServiceNow_Response: {
-                runAfter: {
-                  Create_ServiceNow_Ticket: [
-                    'Succeeded'
-                    'Failed'
-                  ]
-                }
-                type: 'If'
-                expression: {
-                  and: [
-                    {
-                      greater: [
-                        '@outputs(\'Create_ServiceNow_Ticket\')[\'statusCode\']'
-                        199
-                      ]
-                    }
-                    {
-                      less: [
-                        '@outputs(\'Create_ServiceNow_Ticket\')[\'statusCode\']'
-                        300
-                      ]
-                    }
-                  ]
-                }
-                actions: {
-                  Log_Success: {
-                    type: 'Compose'
-                    inputs: {
-                      message: 'ServiceNow ticket created successfully'
-                      ticketNumber: '@{outputs(\'Create_ServiceNow_Ticket\')?[\'body\']?[\'result\']?[\'number\']}'
-                      deduplicationKey: '@{variables(\'DeduplicationKey\')}'
-                      timestamp: '@{utcNow()}'
-                    }
-                  }
-                }
-                else: {
-                  actions: {
-                    Log_Failure: {
-                      type: 'Compose'
-                      inputs: {
-                        message: 'Failed to create ServiceNow ticket'
-                        error: '@{outputs(\'Create_ServiceNow_Ticket\')}'
-                        deduplicationKey: '@{variables(\'DeduplicationKey\')}'
-                        timestamp: '@{utcNow()}'
-                      }
-                    }
-                  }
+                  message: 'Duplicate alert suppressed'
+                  deduplicationKey: '@{variables(\'DeduplicationKey\')}'
+                  timestamp: '@{utcNow()}'
                 }
               }
             }
@@ -435,6 +422,9 @@ resource logicApp 'Microsoft.Logic/workflows@2019-05-01' = {
       }
       keyVaultUri: {
         value: keyVault.properties.vaultUri
+      }
+      keyVaultAudience: {
+        value: 'https://vault${environment().suffixes.keyvaultDns}'
       }
       mockServiceNowUrl: {
         value: 'https://${appService.properties.defaultHostName}'

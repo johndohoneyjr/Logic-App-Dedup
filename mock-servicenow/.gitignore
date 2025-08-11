@@ -1,0 +1,5 @@
+﻿node_modules/
+*.log
+.env
+*.zip
+.webhook-url.txt
