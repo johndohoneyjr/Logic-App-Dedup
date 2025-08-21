@@ -289,37 +289,6 @@ az group delete --name rg-alert-dedup-v2 --yes --no-wait
 - **Table Storage**: Standard LRS for cost efficiency
 - **Action Group**: No additional charges for webhook
 
-## 🔄 Recent Changes & Improvements
-
-### Key Fixes Implemented
-
-1. **Fixed Logic App Condition Logic**
-   - **Problem**: Condition was checking `statusCode == 200` for new alerts
-   - **Solution**: Changed to `statusCode == 404` for new alerts (when record not found)
-   - **Result**: Tickets now created correctly for new alerts
-
-2. **PowerShell Script Conversion**
-   - Converted bash scripts to PowerShell for native Windows support
-   - Enhanced error handling and output formatting
-   - Better integration with Windows development environment
-
-3. **Enhanced Testing Workflow**
-   - Added `clear-deduplication-table.ps1` for fresh testing
-   - Improved test result analysis and reporting
-   - Better deduplication verification
-
-4. **Bicep Template Structure Fix**
-   - Resolved Logic App resource definition syntax errors
-   - Fixed parameters placement within properties section
-   - Successful deployment validation
-
-### What Was Fixed
-
-- **Logic App Condition Logic**: Corrected duplicate detection logic permanently in deployment template
-- **Template Structure**: Fixed Bicep syntax errors preventing deployment
-- **Testing Process**: Added tools to handle hour-based deduplication windows during testing
-- **Script Compatibility**: Full PowerShell support for Windows environments
-
 ### Project Evolution
 
 This project has evolved from a basic alert deduplication concept to a production-ready, enterprise-grade Azure solution with:
@@ -370,15 +339,7 @@ cd /path/to/your/project
 # Deploy complete solution with enhanced security (5-7 minutes)
 ./deploy.sh
 ```
-
-### 2. Fix Key Vault Authentication (if needed)
-
-```bash
-# Fix Logic App Key Vault authentication with correct audience
-./fix-keyvault-auth.sh
-```
-
-### 3. Test the Solution
+### 2. Test the Solution
 
 ```bash
 # Run comprehensive tests
@@ -471,12 +432,8 @@ Properties: AlertId, ProcessedDateTime, Severity
 
 **Logic App Not Creating ServiceNow Tickets**
 - Check Logic App run history in Azure Portal
-- Debug with script: `./debug-logic-app.sh`
-- Fix Key Vault authentication: `./fix-keyvault-auth.sh`
 - Verify Key Vault secret exists: `az keyvault secret list --vault-name [vault-name]`
 - Test Mock ServiceNow directly: `curl https://[app-service-url]/`
-- **Common Issue**: Key Vault authentication audience error
-  - Solution: Run `./fix-keyvault-auth.sh` to set correct audience
 - **Common Issue**: Deduplication records exist but no tickets created
   - Logic App is processing alerts (good!)
   - ServiceNow API call may be failing
